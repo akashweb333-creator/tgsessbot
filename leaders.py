@@ -2179,7 +2179,7 @@ async def leader_upload_number_receive_info(update: Update, context: ContextType
     return LEADER_UPLOAD_NUMBER_CONFIRM
 
 async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create session FILE and upload to storage channel - FIXED"""
+    """Create session and store directly in MongoDB - NO LOCAL FILES"""
     query = update.callback_query
     await query.answer()
     
@@ -2200,12 +2200,12 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         info = context.user_data.get('manual_info')
         phone_code_hash = context.user_data.get('phone_code_hash')
         
-        # Get the existing client and session path from context
+        # Get the existing client from context
         client = context.user_data.get('temp_client')
         session_path = context.user_data.get('session_path')
         session_name = context.user_data.get('session_name')
         
-        if not client or not phone_code_hash or not session_path:
+        if not client or not phone_code_hash:
             await query.edit_message_text(
                 "❌ Session expired!\n\n"
                 "Please start over from the beginning."
@@ -2215,6 +2215,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         
         # Import error types
         from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
+        from telethon.sessions import StringSession
         
         try:
             await query.edit_message_text("🔍 Verifying OTP...")
@@ -2222,7 +2223,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             # Sign in with phone, code, and phone_code_hash
             try:
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-                await query.edit_message_text("✅ Login successful! Creating session file...")
+                await query.edit_message_text("✅ Login successful! Creating session...")
                 
             except SessionPasswordNeededError:
                 # 2FA required
@@ -2239,7 +2240,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 
                 try:
                     await client.sign_in(password=two_fa)
-                    await query.edit_message_text("✅ 2FA verified! Creating session file...")
+                    await query.edit_message_text("✅ 2FA verified! Creating session...")
                 except Exception as e:
                     await client.disconnect()
                     await query.edit_message_text(
@@ -2267,32 +2268,23 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             logger.info(f"✅ Logged in successfully: {verified_phone}")
             
-            # ✅ Disconnect to save session file
-            await query.edit_message_text("💾 Saving session file...")
+            # ✅ Extract session string (NO FILE NEEDED)
+            await query.edit_message_text("💾 Extracting session data...")
             
-            if client.is_connected():
-                await client.disconnect()
+            session_string = StringSession.save(client.session)
             
-            # ✅ Wait a moment for file to be written
-            await asyncio.sleep(1)
+            logger.info(f"✅ Session string extracted: {len(session_string)} chars")
             
-            # ✅ Verify session file was created
-            if not os.path.exists(session_path):
-                raise Exception(f"Session file not created at {session_path}")
+            # ✅ Verify session works with DIFFERENT OpenTele API
+            await query.edit_message_text("🔍 Verifying session and checking spam status...")
             
-            logger.info(f"✅ Session file created: {session_path} ({os.path.getsize(session_path)} bytes)")
-            
-            # ✅ NOW convert session to use different OpenTele API for verification
-            await query.edit_message_text("🔍 Converting session and checking spam status...")
-            
-            # Import OpenTele conversion
-            from opentele.api import UseCurrentSession, API
+            # Import OpenTele
+            from opentele.api import API
             from opentele.tl import TelegramClient as OpenTeleClient
             
-            # Pick a DIFFERENT OpenTele API for verification (not the one used to create)
+            # Pick a DIFFERENT OpenTele API for verification
             api_used = context.user_data.get('api_used', 'TelegramDesktop')
             
-            # Select different API for verification
             verification_apis = {
                 'TelegramDesktop': API.TelegramAndroid,
                 'TelegramAndroid': API.TelegramIOS,
@@ -2303,10 +2295,10 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             verification_api = verification_apis.get(api_used, API.TelegramAndroid)
             
-            logger.info(f"🔄 Converting from {api_used} to {verification_api}")
+            logger.info(f"🔄 Verifying with {verification_api}")
             
-            # Create verification client with different OpenTele API
-            verify_client = OpenTeleClient(session_name, api=verification_api)
+            # Create verification client with session string
+            verify_client = OpenTeleClient(StringSession(session_string), api=verification_api)
             await verify_client.connect()
             
             # Verify it's authorized
@@ -2318,7 +2310,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             me = await verify_client.get_me()
             verified_phone = me.phone
             
-            logger.info(f"✅ Session verified with standard API for: {verified_phone}")
+            logger.info(f"✅ Session verified with {verification_api}: {verified_phone}")
             
             # Check spam status
             spam_check = await check_account_with_spambot(verify_client, verified_phone)
@@ -2330,10 +2322,14 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             # Disconnect verification client
             await verify_client.disconnect()
             
-            # ✅ Session is ready - it's already using OpenTele API (safe!)
+            # Disconnect original client
+            if client.is_connected():
+                await client.disconnect()
             
-            # ✅ Upload SESSION FILE to storage channel
-            await query.edit_message_text("📤 Uploading to storage channel...")
+            # ✅ STORE SESSION STRING DIRECTLY IN MONGODB (NO FILE UPLOAD)
+            await query.edit_message_text("💾 Storing session in database...")
+            
+            database = get_db()
             
             # Get emoji for spam status
             status_emoji = {
@@ -2345,32 +2341,68 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             }
             emoji = status_emoji.get(spam_check['status'], '❓')
             
-            # Upload the OpenTele session FILE to storage channel (NEVER use your API!)
-            with open(session_path, 'rb') as f:
-                caption_parts = [
-                    f"📱 Phone: {verified_phone}",
-                    f"{emoji} Status: {spam_check['status']}"
+            # ✅ Store session data in pending_uploads
+            session_data = {
+                'session_string': session_string,  # ✅ DIRECT SESSION STRING
+                'phone': verified_phone,
+                'country': country,
+                'has_2fa': has_2fa,
+                'two_fa_password': two_fa,
+                'price': price,
+                'info': info,
+                'spam_status': spam_check['status'],
+                'auto_info': auto_info
+            }
+            
+            pending_data = {
+                "uploader_id": user_id,
+                "uploader_username": query.from_user.username or query.from_user.first_name,
+                "sessions": [session_data],
+                "upload_type": "manual_number",
+                "status": "pending",
+                "created_at": datetime.utcnow()
+            }
+            
+            result = database.pending_uploads.insert_one(pending_data)
+            pending_id = result.inserted_id
+            
+            logger.info(f"✅ Session stored in MongoDB: {verified_phone}")
+            
+            # Send to admin for approval
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f'approve_upload_{pending_id}'),
+                    InlineKeyboardButton("❌ Reject", callback_data=f'reject_upload_{pending_id}')
                 ]
-                
-                if auto_info:
-                    caption_parts.append(f"ℹ️ {auto_info}")
-                
-                if info:
-                    caption_parts.append(f"📝 {info}")
-                
-                caption_parts.append(f"👨‍💼 Uploaded by: {query.from_user.username or user_id}")
-                caption_parts.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                
-                channel_message = await context.bot.send_document(
-                    chat_id=config.STORAGE_CHANNEL_ID,
-                    document=f,
-                    filename=f"{verified_phone}.session",
-                    caption="\n".join(caption_parts)
-                )
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-            message_id = channel_message.message_id
+            await context.bot.send_message(
+                config.OWNER_ID,
+                f"📱 New Manual Number Upload\n\n"
+                f"👨‍💼 Seller: @{query.from_user.username or 'Unknown'} (ID: {user_id})\n"
+                f"📱 Phone: {verified_phone}\n"
+                f"🌍 Country: {country}\n"
+                f"💰 Price: ${price:.2f}\n"
+                f"🔐 2FA: {'Yes' if has_2fa else 'No'}\n"
+                f"{emoji} Status: {spam_check['status']}\n"
+                f"ℹ️ Info: {info or 'None'}\n"
+                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"⚠️ Session will NOT be added until you approve!",
+                reply_markup=reply_markup
+            )
             
-            logger.info(f"✅ Session file uploaded to channel, message_id: {message_id}")
+            await query.edit_message_text(
+                f"✅ Upload Submitted!\n\n"
+                f"📱 Phone: {verified_phone}\n"
+                f"{emoji} Status: {spam_check['message']}\n"
+                f"🌍 Country: {country}\n"
+                f"💰 Price: ${price:.2f}\n\n"
+                f"⏳ Waiting for admin approval\n\n"
+                "You'll be notified once approved!"
+            )
+            
+            logger.info(f"✅ Manual upload complete: {verified_phone} - Stored in MongoDB")
             
         except Exception as login_error:
             logger.error(f"Login error: {login_error}")
@@ -2390,78 +2422,8 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 "Please try again or contact support."
             )
             
-            # Clean up session file
-            try:
-                if os.path.exists(session_path):
-                    os.unlink(session_path)
-            except:
-                pass
-            
             context.user_data.clear()
             return ConversationHandler.END
-        
-        # ✅ Store in pending_uploads (message_id points to storage channel)
-        database = get_db()
-        
-        session_data = {
-            'message_id': message_id,  # Reference to storage channel file
-            'phone': verified_phone,
-            'country': country,
-            'has_2fa': has_2fa,
-            'two_fa_password': two_fa,
-            'price': price,
-            'info': info,
-            'spam_status': spam_check['status'],
-            'auto_info': auto_info
-        }
-        
-        pending_data = {
-            "uploader_id": user_id,
-            "uploader_username": query.from_user.username or query.from_user.first_name,
-            "sessions": [session_data],
-            "upload_type": "manual_number",
-            "status": "pending",
-            "created_at": datetime.utcnow()
-        }
-        
-        result = database.pending_uploads.insert_one(pending_data)
-        pending_id = result.inserted_id
-        
-        # Send to admin for approval
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f'approve_upload_{pending_id}'),
-                InlineKeyboardButton("❌ Reject", callback_data=f'reject_upload_{pending_id}')
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await context.bot.send_message(
-            config.OWNER_ID,
-            f"📱 New Manual Number Upload\n\n"
-            f"👨‍💼 Seller: @{query.from_user.username or 'Unknown'} (ID: {user_id})\n"
-            f"📱 Phone: {verified_phone}\n"
-            f"🌍 Country: {country}\n"
-            f"💰 Price: ${price:.2f}\n"
-            f"🔐 2FA: {'Yes' if has_2fa else 'No'}\n"
-            f"{emoji} Status: {spam_check['status']}\n"
-            f"ℹ️ Info: {info or 'None'}\n"
-            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-            f"⚠️ Session will NOT be added until you approve!",
-            reply_markup=reply_markup
-        )
-        
-        await query.edit_message_text(
-            f"✅ Upload Submitted!\n\n"
-            f"📱 Phone: {verified_phone}\n"
-            f"{emoji} Status: {spam_check['message']}\n"
-            f"🌍 Country: {country}\n"
-            f"💰 Price: ${price:.2f}\n\n"
-            f"⏳ Waiting for admin approval\n\n"
-            "You'll be notified once approved!"
-        )
-        
-        logger.info(f"✅ Manual upload complete: {verified_phone} - Message ID: {message_id}")
         
     except Exception as e:
         logger.error(f"Error uploading manual number: {e}")
@@ -2470,7 +2432,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         await query.edit_message_text(f"❌ Error: {str(e)}")
     
     finally:
-        # Clean up temp session file
+        # Clean up temp session file if it exists
         if 'session_path' in context.user_data:
             try:
                 path = context.user_data['session_path']
@@ -2483,7 +2445,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         context.user_data.clear()
     
     return ConversationHandler.END
-
+    
 def setup_leader_handlers(application):
     """Setup leader command handlers"""
     logger.info("✅ Leader handlers setup started")
@@ -2558,3 +2520,4 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
