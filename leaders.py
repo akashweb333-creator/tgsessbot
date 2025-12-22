@@ -2179,7 +2179,7 @@ async def leader_upload_number_receive_info(update: Update, context: ContextType
     return LEADER_UPLOAD_NUMBER_CONFIRM
 
 async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create session and upload - FORCES SESSION SAVE"""
+    """Create session and upload - NO LOCAL STORAGE"""
     query = update.callback_query
     await query.answer()
     
@@ -2203,12 +2203,14 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         client = context.user_data.get('temp_client')
         session_path = context.user_data.get('session_path')
         
-        if not client or not phone_code_hash or not session_path:
+        if not client or not phone_code_hash:
             await query.edit_message_text("❌ Session expired!")
             context.user_data.clear()
             return ConversationHandler.END
         
         from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
+        from telethon.sessions import StringSession
+        import io
         
         try:
             await query.edit_message_text("🔐 Verifying OTP...")
@@ -2236,63 +2238,32 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # ✅ FIX: Get logged in user info to trigger session save
-            await query.edit_message_text("💾 Saving session...")
+            # ✅ Get session string (NO FILE STORAGE)
+            await query.edit_message_text("💾 Getting session string...")
             
-            try:
-                from telethon.tl.functions.users import GetFullUserRequest
-                me = await client.get_me()
-                logger.info(f"✅ Logged in as: {me.id}")
-            except Exception as e:
-                logger.warning(f"Get me error: {e}")
+            # Get session string while client is connected
+            session_string = client.session.save()
+            logger.info(f"✅ Got session string: {len(session_string) if session_string else 0} chars")
             
-            # ✅ FIX: Disconnect to force save session to disk
+            # Disconnect
             if client.is_connected():
                 await client.disconnect()
             
-            # Small delay to ensure file is written
-            import asyncio
-            await asyncio.sleep(0.5)
-            
-            # Check if session file exists
-            if not os.path.exists(session_path):
-                # ✅ FIX: If still not created, try to save manually
-                logger.error(f"Session file not at: {session_path}")
-                
-                # Try to get session string and save it
-                try:
-                    # Reconnect
-                    await client.connect()
-                    session_string = client.session.save()
-                    await client.disconnect()
-                    
-                    # Save to file manually
-                    with open(session_path, 'w') as f:
-                        f.write(session_string)
-                    
-                    logger.info(f"✅ Manually saved session string")
-                except Exception as save_error:
-                    logger.error(f"Manual save failed: {save_error}")
-                    await query.edit_message_text("❌ Failed to save session!")
-                    context.user_data.clear()
-                    return ConversationHandler.END
-            
-            # Final check
-            if not os.path.exists(session_path):
-                await query.edit_message_text("❌ Session file not created!")
-                context.user_data.clear()
-                return ConversationHandler.END
-            
-            logger.info(f"✅ Session file confirmed: {session_path}")
+            # Clean up temp file if it exists
+            try:
+                if session_path and os.path.exists(session_path):
+                    os.unlink(session_path)
+            except:
+                pass
             
             await query.edit_message_text("🔍 Checking spam...")
             
-            # Spam check
+            # Spam check using session string
             spam_client = None
             try:
-                session_name = session_path.replace('.session', '')
+                # Create new client with session string
                 spam_client = TelegramClient(
-                    session_name,
+                    StringSession(session_string),
                     config.TELEGRAM_API_ID,
                     config.TELEGRAM_API_HASH
                 )
@@ -2309,11 +2280,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             # Block spam/frozen
             if spam_check['status'] in ['Spam', 'Frozen']:
-                try:
-                    os.unlink(session_path)
-                except:
-                    pass
-                
                 status_emoji = {'Spam': '🟡', 'Frozen': '🔴'}
                 emoji = status_emoji.get(spam_check['status'], '❌')
                 
@@ -2326,8 +2292,8 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # Upload
-            await query.edit_message_text("📤 Uploading...")
+            # Upload session string as text file
+            await query.edit_message_text("📤 Uploading session...")
             
             status_emoji = {
                 'Free': '🟢',
@@ -2337,33 +2303,31 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             }
             emoji = status_emoji.get(spam_check['status'], '❓')
             
-            with open(session_path, 'rb') as f:
-                caption_parts = [
-                    f"📱 Phone: {phone}",
-                    f"{emoji} Status: {spam_check['status']}"
-                ]
-                
-                if info:
-                    caption_parts.append(f"ℹ️ {info}")
-                
-                caption_parts.append(f"👨‍💼 By: {query.from_user.username or user_id}")
-                caption_parts.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                
-                channel_message = await context.bot.send_document(
-                    chat_id=config.STORAGE_CHANNEL_ID,
-                    document=f,
-                    filename=f"{phone}.session",
-                    caption="\n".join(caption_parts)
-                )
+            # Create text file in memory (NO DISK STORAGE)
+            session_file = io.BytesIO(session_string.encode('utf-8'))
+            session_file.name = f"{phone}.session"
+            
+            caption_parts = [
+                f"📱 Phone: {phone}",
+                f"{emoji} Status: {spam_check['status']}"
+            ]
+            
+            if info:
+                caption_parts.append(f"ℹ️ {info}")
+            
+            caption_parts.append(f"👨‍💼 By: {query.from_user.username or user_id}")
+            caption_parts.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            
+            # Upload to storage channel (direct from memory)
+            channel_message = await context.bot.send_document(
+                chat_id=config.STORAGE_CHANNEL_ID,
+                document=session_file,
+                filename=f"{phone}.session",
+                caption="\n".join(caption_parts)
+            )
             
             message_id = channel_message.message_id
-            logger.info(f"✅ Uploaded: message_id={message_id}")
-            
-            # Delete temp
-            try:
-                os.unlink(session_path)
-            except:
-                pass
+            logger.info(f"✅ Uploaded session string: message_id={message_id}")
             
             # Store in MongoDB
             database = get_db()
@@ -2422,7 +2386,8 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 f"🌍 Country: {country}\n"
                 f"💰 Price: ${price:.2f}\n"
                 f"📊 Status: {spam_check['status']}\n\n"
-                f"💾 Stored in cloud\n"
+                f"☁️ Session uploaded to cloud\n"
+                f"💾 No local storage used\n"
                 f"⏳ Waiting admin approval"
             )
         
@@ -2430,7 +2395,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             logger.error(f"Login error: {login_error}")
             if client and client.is_connected():
                 await client.disconnect()
-            await query.edit_message_text(f"❌ Login Failed\n\n{str(login_error)}")
+            await query.edit_message_text(f"❌ Failed\n\n{str(login_error)}")
             context.user_data.clear()
             return ConversationHandler.END
         
@@ -2441,10 +2406,16 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         await query.edit_message_text(f"❌ Error: {str(e)}")
     
     finally:
+        # Clean up any temp files
+        try:
+            session_path = context.user_data.get('session_path')
+            if session_path and os.path.exists(session_path):
+                os.unlink(session_path)
+        except:
+            pass
         context.user_data.clear()
     
     return ConversationHandler.END
-
 
 
 def setup_leader_handlers(application):
@@ -2521,6 +2492,7 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
 
 
 
