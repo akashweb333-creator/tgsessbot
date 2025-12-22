@@ -1913,7 +1913,7 @@ async def leader_upload_number_receive_country(update: Update, context: ContextT
     return LEADER_UPLOAD_NUMBER_PHONE
 
 async def leader_upload_number_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Request OTP - CREATES TEMP FILE THAT WE'LL UPLOAD"""
+    """Request OTP using OpenTele API"""
     user_id = update.effective_user.id
     if user_id not in LEADERS and user_id != config.OWNER_ID:
         await update.message.reply_text("❌ Unauthorized")
@@ -1929,13 +1929,15 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
     
     try:
         from opentele.api import API
+        from opentele.tl import TelegramClient
+        from opentele.td import TDesktop
     except ImportError:
         await update.message.reply_text("❌ OpenTele not installed!")
         return ConversationHandler.END
     
     await update.message.reply_text(
         f"✅ Phone: {phone}\n\n"
-        "🔐 Using Telegram Official API\n"
+        "🔐 Using OpenTele API\n"
         "⏳ Requesting OTP..."
     )
     
@@ -1944,41 +1946,33 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         import os
         import random
         
-        # Select official API
+        # Select API
         available_apis = [API.TelegramAndroid, API.TelegramIOS]
         selected_api = random.choice(available_apis)
         
-        official_api_id = int(selected_api.api_id)
-        official_api_hash = str(selected_api.api_hash)
+        logger.info(f"🔐 Selected: {selected_api}")
         
-        logger.info(f"🔐 Using API_ID: {official_api_id}")
-        
-        # Create temp session file - THIS WILL BE THE FILE WE UPLOAD
+        # Create temp session file
         temp_dir = tempfile.gettempdir()
         session_filename = f"manual_{user_id}_{int(time.time())}.session"
         session_path = os.path.join(temp_dir, session_filename)
         session_name = session_path.replace('.session', '')
         
-        # Remove if exists
         if os.path.exists(session_path):
             os.unlink(session_path)
         
-        from telethon import TelegramClient
-        
-        # Create client with file session
+        # ✅ USE OPENTELE'S TelegramClient (not regular Telethon)
+        # This is the correct way to use OpenTele
         client = TelegramClient(
-            session_name,  # This creates a SQLite file
-            official_api_id,
-            official_api_hash
+            session_name,
+            api=selected_api  # Pass the API object directly
         )
         
         await client.connect()
         sent_code = await client.send_code_request(phone)
         
-        # Store for later
         context.user_data['temp_client'] = client
         context.user_data['session_path'] = session_path
-        context.user_data['session_name'] = session_name
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
         
         await update.message.reply_text(
@@ -1994,60 +1988,6 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         traceback.print_exc()
         await update.message.reply_text(f"❌ Failed: {str(e)}")
         return ConversationHandler.END
-
-async def leader_upload_number_receive_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive OTP code"""
-    user_id = update.effective_user.id
-    if user_id not in LEADERS and user_id != config.OWNER_ID:
-        await update.message.reply_text("❌ Unauthorized")
-        return ConversationHandler.END
-    
-    otp = update.message.text.strip()
-    
-    if len(otp) < 5:
-        await update.message.reply_text("❌ OTP seems too short.\n\nTry again:")
-        return LEADER_UPLOAD_NUMBER_OTP
-    
-    context.user_data['manual_otp'] = otp
-    
-    await update.message.reply_text(
-        f"✅ OTP: {otp}\n\n"
-        "🔐 Step 4: 2FA Password\n\n"
-        "Enter the 2FA password, or type 'no' if there's no 2FA:"
-    )
-    
-    return LEADER_UPLOAD_NUMBER_2FA
-
-async def leader_upload_number_receive_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive 2FA password"""
-    user_id = update.effective_user.id
-    if user_id not in LEADERS and user_id != config.OWNER_ID:
-        await update.message.reply_text("❌ Unauthorized")
-        return ConversationHandler.END
-    
-    two_fa_text = update.message.text.strip()
-    
-    if two_fa_text.lower() in ['no', 'none', 'skip']:
-        context.user_data['manual_has_2fa'] = False
-        context.user_data['manual_2fa'] = None
-        two_fa_display = "No 2FA"
-    else:
-        context.user_data['manual_has_2fa'] = True
-        context.user_data['manual_2fa'] = two_fa_text
-        two_fa_display = "Yes"
-    
-    await update.message.reply_text(
-        f"✅ 2FA: {two_fa_display}\n\n"
-        "💰 Step 5: Enter Price\n\n"
-        "⚠️ Remember: 15% commission to owner\n"
-        "You earn 85% of the price\n\n"
-        "Examples:\n"
-        "• Set $2.00 → You earn $1.70\n"
-        "• Set $1.50 → You earn $1.28\n\n"
-        "Enter price in USD:"
-    )
-    
-    return LEADER_UPLOAD_NUMBER_PRICE
 
 async def leader_upload_number_receive_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive price for manual session"""
@@ -2124,7 +2064,7 @@ async def leader_upload_number_receive_info(update: Update, context: ContextType
     return LEADER_UPLOAD_NUMBER_CONFIRM
 
 async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Login and upload - UPLOADS THE SQLITE FILE DIRECTLY"""
+    """Login and upload"""
     query = update.callback_query
     await query.answer()
     
@@ -2182,29 +2122,50 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # Get user info to ensure login is complete
+            # Get user info
             await query.edit_message_text("💾 Saving session...")
             me = await client.get_me()
             logger.info(f"✅ Logged in as: {me.id}")
             
-            # Disconnect to save session to file
-            if client.is_connected():
+            # ✅ Convert OpenTele session to Telethon format
+            # Use ToTelethon() to convert
+            try:
+                from opentele.tl import TelegramClient as OpenTeleClient
+                
+                # Export to Telethon format
+                telethon_client = await client.ToTelethon(
+                    session=session_path.replace('.session', ''),
+                    flag=UseCurrentSession
+                )
+                
+                # Disconnect OpenTele client
                 await client.disconnect()
+                
+                # Now disconnect Telethon client to save
+                if telethon_client.is_connected():
+                    await telethon_client.disconnect()
+                
+            except Exception as convert_error:
+                logger.error(f"Conversion error: {convert_error}")
+                # Just disconnect OpenTele client
+                if client.is_connected():
+                    await client.disconnect()
             
-            # Wait for file to be written
+            # Wait for file write
             await asyncio.sleep(1)
             
-            # Check if session file exists
+            # Check file
             if not os.path.exists(session_path):
                 await query.edit_message_text("❌ Session file not created!")
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            logger.info(f"✅ Session file: {session_path} ({os.path.getsize(session_path)} bytes)")
+            logger.info(f"✅ Session file: {os.path.getsize(session_path)} bytes")
             
             await query.edit_message_text("🔍 Checking spam...")
             
-            # Spam check
+            # Spam check with regular Telethon
+            from telethon import TelegramClient
             spam_client = None
             try:
                 session_name = session_path.replace('.session', '')
@@ -2243,8 +2204,8 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # Upload the SQLite session file
-            await query.edit_message_text("📤 Uploading session file...")
+            # Upload
+            await query.edit_message_text("📤 Uploading...")
             
             status_emoji = {
                 'Free': '🟢',
@@ -2276,12 +2237,11 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             message_id = channel_message.message_id
             logger.info(f"✅ Uploaded: message_id={message_id}")
             
-            # Delete temp file
+            # Delete temp
             try:
                 os.unlink(session_path)
-                logger.info(f"🗑️ Deleted temp file")
-            except Exception as e:
-                logger.error(f"Delete failed: {e}")
+            except:
+                pass
             
             # Store in MongoDB
             database = get_db()
@@ -2308,7 +2268,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             result = database.pending_uploads.insert_one(pending_data)
             pending_id = result.inserted_id
-            logger.info(f"✅ Stored in MongoDB: {phone}")
             
             # Notify admin
             keyboard = [
@@ -2335,25 +2294,23 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             )
             
             await query.edit_message_text(
-                f"✅ Upload Complete!\n\n"
+                f"✅ Complete!\n\n"
                 f"📱 Phone: {phone}\n"
                 f"🌍 Country: {country}\n"
                 f"💰 Price: ${price:.2f}\n"
                 f"📊 Status: {spam_check['status']}\n\n"
-                f"☁️ Session in storage channel\n"
-                f"💾 Metadata in MongoDB\n"
-                f"⏳ Waiting admin approval"
+                f"☁️ Uploaded\n"
+                f"⏳ Waiting approval"
             )
         
         except Exception as login_error:
-            logger.error(f"Login error: {login_error}")
+            logger.error(f"Error: {login_error}")
             import traceback
             traceback.print_exc()
             
             if client and client.is_connected():
                 await client.disconnect()
             
-            # Clean up temp file
             try:
                 if session_path and os.path.exists(session_path):
                     os.unlink(session_path)
@@ -2371,7 +2328,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         await query.edit_message_text(f"❌ Error: {str(e)}")
     
     finally:
-        # Final cleanup
         try:
             session_path = context.user_data.get('session_path')
             if session_path and os.path.exists(session_path):
@@ -2457,6 +2413,7 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
 
 
 
