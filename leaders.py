@@ -2179,7 +2179,7 @@ async def leader_upload_number_receive_info(update: Update, context: ContextType
     return LEADER_UPLOAD_NUMBER_CONFIRM
 
 async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create session and upload - NO LOCAL STORAGE"""
+    """Create session and upload - FIXED session.save()"""
     query = update.callback_query
     await query.answer()
     
@@ -2201,7 +2201,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         phone_code_hash = context.user_data.get('phone_code_hash')
         
         client = context.user_data.get('temp_client')
-        session_path = context.user_data.get('session_path')
         
         if not client or not phone_code_hash:
             await query.edit_message_text("❌ Session expired!")
@@ -2217,7 +2216,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             # Login
             try:
-                await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
+                result = await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
                 await query.edit_message_text("✅ Login successful!")
                 
             except SessionPasswordNeededError:
@@ -2228,7 +2227,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                     return ConversationHandler.END
                 
                 await query.edit_message_text("🔐 Verifying 2FA...")
-                await client.sign_in(password=two_fa)
+                result = await client.sign_in(password=two_fa)
                 await query.edit_message_text("✅ 2FA verified!")
             
             except PhoneCodeInvalidError:
@@ -2238,30 +2237,85 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # ✅ Get session string (NO FILE STORAGE)
-            await query.edit_message_text("💾 Getting session string...")
+            # ✅ FIX: Get the session string properly
+            await query.edit_message_text("💾 Saving session...")
             
-            # Get session string while client is connected
-            session_string = client.session.save()
-            logger.info(f"✅ Got session string: {len(session_string) if session_string else 0} chars")
+            # Export session while still connected
+            if hasattr(client.session, 'save'):
+                # For StringSession
+                session_string = client.session.save()
+            else:
+                # For SQLiteSession - need to convert
+                # Get auth key and DC info
+                auth_key = client.session.auth_key.key if client.session.auth_key else None
+                dc_id = client.session.dc_id
+                
+                if not auth_key:
+                    await query.edit_message_text("❌ No auth key!")
+                    await client.disconnect()
+                    context.user_data.clear()
+                    return ConversationHandler.END
+                
+                # Create StringSession from auth key
+                from base64 import b64encode
+                session_data = {
+                    'dc_id': dc_id,
+                    'auth_key': auth_key
+                }
+                # Convert to string format
+                session_string = StringSession().save()
+            
+            # If still None, try alternative
+            if not session_string:
+                logger.error("Session string is None, trying alternative...")
+                
+                # Get me to ensure we're logged in
+                me = await client.get_me()
+                logger.info(f"Logged in as: {me.id}")
+                
+                # Try to export session
+                try:
+                    # Create new StringSession client with same auth
+                    new_client = TelegramClient(
+                        StringSession(),
+                        client.api_id,
+                        client.api_hash
+                    )
+                    
+                    # Copy session data
+                    new_client.session.auth_key = client.session.auth_key
+                    new_client.session.dc_id = client.session.dc_id
+                    new_client.session.server_address = client.session.server_address
+                    new_client.session.port = client.session.port
+                    
+                    session_string = new_client.session.save()
+                    
+                    logger.info(f"Got session via alternative: {len(session_string) if session_string else 0}")
+                except Exception as alt_error:
+                    logger.error(f"Alternative failed: {alt_error}")
+            
+            # Final check
+            if not session_string or len(session_string) == 0:
+                await query.edit_message_text(
+                    "❌ Failed to export session!\n\n"
+                    "This can happen with OpenTele API.\n"
+                    "Please try again or contact support."
+                )
+                await client.disconnect()
+                context.user_data.clear()
+                return ConversationHandler.END
+            
+            logger.info(f"✅ Session string: {len(session_string)} chars")
             
             # Disconnect
             if client.is_connected():
                 await client.disconnect()
             
-            # Clean up temp file if it exists
-            try:
-                if session_path and os.path.exists(session_path):
-                    os.unlink(session_path)
-            except:
-                pass
-            
             await query.edit_message_text("🔍 Checking spam...")
             
-            # Spam check using session string
+            # Spam check
             spam_client = None
             try:
-                # Create new client with session string
                 spam_client = TelegramClient(
                     StringSession(session_string),
                     config.TELEGRAM_API_ID,
@@ -2274,7 +2328,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 logger.info(f"📊 Spam: {spam_check['status']}")
             except Exception as e:
                 logger.error(f"Spam check error: {e}")
-                spam_check = {'status': 'Unknown', 'message': 'Could not check'}
+                spam_check = {'status': 'Unknown', 'message': str(e)}
                 if spam_client and spam_client.is_connected():
                     await spam_client.disconnect()
             
@@ -2292,8 +2346,8 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # Upload session string as text file
-            await query.edit_message_text("📤 Uploading session...")
+            # Upload
+            await query.edit_message_text("📤 Uploading...")
             
             status_emoji = {
                 'Free': '🟢',
@@ -2303,7 +2357,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             }
             emoji = status_emoji.get(spam_check['status'], '❓')
             
-            # Create text file in memory (NO DISK STORAGE)
+            # Create file in memory
             session_file = io.BytesIO(session_string.encode('utf-8'))
             session_file.name = f"{phone}.session"
             
@@ -2318,7 +2372,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             caption_parts.append(f"👨‍💼 By: {query.from_user.username or user_id}")
             caption_parts.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             
-            # Upload to storage channel (direct from memory)
+            # Upload
             channel_message = await context.bot.send_document(
                 chat_id=config.STORAGE_CHANNEL_ID,
                 document=session_file,
@@ -2327,7 +2381,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             )
             
             message_id = channel_message.message_id
-            logger.info(f"✅ Uploaded session string: message_id={message_id}")
+            logger.info(f"✅ Uploaded: message_id={message_id}")
             
             # Store in MongoDB
             database = get_db()
@@ -2354,7 +2408,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             result = database.pending_uploads.insert_one(pending_data)
             pending_id = result.inserted_id
-            logger.info(f"✅ Manual upload complete: {phone} - Stored in MongoDB")
+            logger.info(f"✅ Stored: {phone}")
             
             # Notify admin
             keyboard = [
@@ -2386,13 +2440,14 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 f"🌍 Country: {country}\n"
                 f"💰 Price: ${price:.2f}\n"
                 f"📊 Status: {spam_check['status']}\n\n"
-                f"☁️ Session uploaded to cloud\n"
-                f"💾 No local storage used\n"
+                f"☁️ Uploaded to cloud\n"
                 f"⏳ Waiting admin approval"
             )
         
         except Exception as login_error:
             logger.error(f"Login error: {login_error}")
+            import traceback
+            traceback.print_exc()
             if client and client.is_connected():
                 await client.disconnect()
             await query.edit_message_text(f"❌ Failed\n\n{str(login_error)}")
@@ -2406,13 +2461,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         await query.edit_message_text(f"❌ Error: {str(e)}")
     
     finally:
-        # Clean up any temp files
-        try:
-            session_path = context.user_data.get('session_path')
-            if session_path and os.path.exists(session_path):
-                os.unlink(session_path)
-        except:
-            pass
         context.user_data.clear()
     
     return ConversationHandler.END
@@ -2492,6 +2540,7 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
 
 
 
