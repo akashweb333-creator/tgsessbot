@@ -1913,7 +1913,7 @@ async def leader_upload_number_receive_country(update: Update, context: ContextT
     return LEADER_UPLOAD_NUMBER_PHONE
 
 async def leader_upload_number_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive phone and request OTP - WORKING VERSION"""
+    """Request OTP using Telegram's official APIs (NOT your personal API)"""
     user_id = update.effective_user.id
     if user_id not in LEADERS and user_id != config.OWNER_ID:
         await update.message.reply_text("❌ Unauthorized")
@@ -1931,48 +1931,65 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
     
     context.user_data['manual_phone'] = phone
     
+    # Check if OpenTele is available
+    if not OPENTELE_AVAILABLE:
+        await update.message.reply_text(
+            "❌ OpenTele not installed!\n\n"
+            "Manual uploads require OpenTele to use official Telegram APIs.\n\n"
+            "Tell admin to run: pip install opentele"
+        )
+        return ConversationHandler.END
+    
     await update.message.reply_text(
         f"✅ Phone: {phone}\n\n"
-        "🔐 Requesting OTP from Telegram...\n\n"
-        "Please wait..."
+        "🔐 Using Telegram Official API\n"
+        "⏳ Requesting OTP..."
     )
     
     try:
-        from telethon import TelegramClient
+        from opentele.td import TDesktop
+        from opentele.api import API
         import tempfile
-        import os
+        import random
         
-        # Create temp session file
+        # Select a random official Telegram API
+        official_api = random.choice([
+            API.TelegramAndroid,  # Official Android app API
+            API.TelegramIOS,      # Official iOS app API
+        ])
+        
+        logger.info(f"🔐 Using official API: {official_api}")
+        
+        # Create temp session path
         temp_session = tempfile.NamedTemporaryFile(suffix='.session', delete=False, mode='w')
         session_path = temp_session.name
         temp_session.close()
         os.unlink(session_path)
         session_name = session_path.replace('.session', '')
         
-        # ============================================
-        # ✅ USE YOUR ORIGINAL WORKING CODE
-        # Uses config API (works!) but we'll protect with OpenTele later
-        # ============================================
+        # Create TelegramClient using OpenTele's official API
+        # This uses Telegram's built-in app credentials, NOT yours
         client = TelegramClient(
             session_name,
-            config.TELEGRAM_API_ID,
-            config.TELEGRAM_API_HASH
+            api=official_api  # Uses Telegram's official API credentials
         )
         
         await client.connect()
         
-        # Send code request - this triggers Telegram to send OTP
+        # Send code request
         sent_code = await client.send_code_request(phone)
         
-        # Store session path and phone_code_hash for later
+        # Store for later
         context.user_data['temp_client'] = client
         context.user_data['session_path'] = session_path
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
+        context.user_data['using_official_api'] = True
         
         await update.message.reply_text(
             f"✅ OTP Sent to {phone}!\n\n"
+            f"🔐 Using: {official_api.name}\n\n"
             "📨 Step 3: Enter OTP Code\n\n"
-            "Check your Telegram app and enter the code you received:"
+            "Check your Telegram app and enter the code:"
         )
         
         return LEADER_UPLOAD_NUMBER_OTP
@@ -1984,7 +2001,7 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         await update.message.reply_text(
             f"❌ Failed to request OTP\n\n"
             f"Error: {str(e)}\n\n"
-            "Please check the phone number and try again."
+            "Please try again."
         )
         return LEADER_UPLOAD_NUMBER_PHONE
 
@@ -2445,4 +2462,5 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
 
