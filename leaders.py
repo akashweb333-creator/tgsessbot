@@ -2329,7 +2329,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                     caption="\n".join(caption_parts)
                 )
             
-            message_id = channel_message.message_id
+             message_id = channel_message.message_id
             
             # Clean up temp file
             try:
@@ -2425,6 +2425,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
     return ConversationHandler.END
 
 
+
 def setup_leader_handlers(application):
     """Setup leader command handlers"""
     logger.info("✅ Leader handlers setup started")
@@ -2497,4 +2498,5 @@ def setup_leader_handlers(application):
     application.add_handler(CallbackQueryHandler(admin_approve_upload, pattern='^approve_upload_'))
     application.add_handler(CallbackQueryHandler(admin_reject_upload, pattern='^reject_upload_'))
     
+
     logger.info("✅ Leader handlers registered successfully")
