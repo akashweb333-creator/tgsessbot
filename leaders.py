@@ -1913,13 +1913,13 @@ async def leader_upload_number_receive_country(update: Update, context: ContextT
     return LEADER_UPLOAD_NUMBER_PHONE
 
 async def leader_upload_number_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive phone and request OTP using ONLY OpenTele API (not your credentials)"""
+    """Request OTP using Telegram's official API"""
     user_id = update.effective_user.id
     if user_id not in LEADERS and user_id != config.OWNER_ID:
         await update.message.reply_text("❌ Unauthorized")
         return ConversationHandler.END
     
-    phone = update.message.text.strip()
+    phone = str(update.message.text.strip())
     
     if not phone.startswith('+') or len(phone) < 10:
         await update.message.reply_text("❌ Invalid phone format!")
@@ -1927,39 +1927,54 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
     
     context.user_data['manual_phone'] = phone
     
-    if not OPENTELE_AVAILABLE:
+    # Check OpenTele
+    try:
+        from opentele.api import API
+    except ImportError:
         await update.message.reply_text(
             "❌ OpenTele not installed!\n\n"
-            "Manual uploads require OpenTele for account safety.\n"
-            "Contact admin to install: pip install opentele"
+            "Run: pip install opentele"
         )
         return ConversationHandler.END
     
     await update.message.reply_text(
         f"✅ Phone: {phone}\n\n"
-        "🔐 Using OpenTele API for safety\n"
+        "🔐 Using Telegram Official API\n"
         "⏳ Requesting OTP..."
     )
     
     try:
         import tempfile
+        import os
+        import random
         
-        # Select random OpenTele API (these are BUILT-IN, not your credentials)
-        selected_api = random.choice(AVAILABLE_APIS)
-        logger.info(f"🔐 Using OpenTele API: {selected_api}")
+        # Select official API
+        available_apis = [API.TelegramAndroid, API.TelegramIOS]
+        selected_api = random.choice(available_apis)
         
-        # Create temp session
-        temp_session = tempfile.NamedTemporaryFile(suffix='.session', delete=False, mode='w')
-        session_path = temp_session.name
-        temp_session.close()
-        os.unlink(session_path)
+        official_api_id = int(selected_api.api_id)
+        official_api_hash = str(selected_api.api_hash)
+        
+        logger.info(f"🔐 Using official API_ID: {official_api_id}")
+        
+        # Create temp session file (will be deleted after upload)
+        temp_dir = tempfile.gettempdir()
+        session_filename = f"manual_upload_{user_id}_{phone.replace('+', '')}.session"
+        session_path = os.path.join(temp_dir, session_filename)
         session_name = session_path.replace('.session', '')
         
-        # ✅ USE OPENTELE API - NOT YOUR CREDENTIALS
-        # OpenTele provides its own API_ID and API_HASH
+        logger.info(f"📁 Temp session: {session_path}")
+        
+        # Remove if exists
+        if os.path.exists(session_path):
+            os.unlink(session_path)
+        
+        from telethon import TelegramClient
+        
         client = TelegramClient(
             session_name,
-            api=selected_api  # This uses OpenTele's built-in credentials
+            official_api_id,
+            official_api_hash
         )
         
         await client.connect()
@@ -1969,7 +1984,6 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         context.user_data['temp_client'] = client
         context.user_data['session_path'] = session_path
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
-        context.user_data['opentele_api'] = selected_api
         
         await update.message.reply_text(
             f"✅ OTP sent to {phone}!\n\n"
@@ -1979,11 +1993,15 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         return LEADER_UPLOAD_NUMBER_OTP
         
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-        return LEADER_UPLOAD_NUMBER_PHONE
+        
+        await update.message.reply_text(
+            f"❌ Failed: {str(e)}\n\n"
+            "Contact support."
+        )
+        return ConversationHandler.END
 
 async def leader_upload_number_receive_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receive OTP code"""
@@ -2429,3 +2447,4 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
