@@ -2179,7 +2179,7 @@ async def leader_upload_number_receive_info(update: Update, context: ContextType
     return LEADER_UPLOAD_NUMBER_CONFIRM
 
 async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create session and upload to storage channel - STORES SQLITE SESSION FILE"""
+    """Create session and upload - FORCES SESSION SAVE"""
     query = update.callback_query
     await query.answer()
     
@@ -2188,7 +2188,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         await query.answer("❌ Unauthorized", show_alert=True)
         return ConversationHandler.END
     
-    await query.edit_message_text("⏳ Logging in to Telegram and creating session...")
+    await query.edit_message_text("⏳ Logging in...")
     
     try:
         phone = context.user_data.get('manual_phone')
@@ -2236,19 +2236,56 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # Disconnect to save SQLite session file
+            # ✅ FIX: Get logged in user info to trigger session save
+            await query.edit_message_text("💾 Saving session...")
+            
+            try:
+                from telethon.tl.functions.users import GetFullUserRequest
+                me = await client.get_me()
+                logger.info(f"✅ Logged in as: {me.id}")
+            except Exception as e:
+                logger.warning(f"Get me error: {e}")
+            
+            # ✅ FIX: Disconnect to force save session to disk
             if client.is_connected():
                 await client.disconnect()
             
-            # Verify SQLite session file was created
+            # Small delay to ensure file is written
+            import asyncio
+            await asyncio.sleep(0.5)
+            
+            # Check if session file exists
+            if not os.path.exists(session_path):
+                # ✅ FIX: If still not created, try to save manually
+                logger.error(f"Session file not at: {session_path}")
+                
+                # Try to get session string and save it
+                try:
+                    # Reconnect
+                    await client.connect()
+                    session_string = client.session.save()
+                    await client.disconnect()
+                    
+                    # Save to file manually
+                    with open(session_path, 'w') as f:
+                        f.write(session_string)
+                    
+                    logger.info(f"✅ Manually saved session string")
+                except Exception as save_error:
+                    logger.error(f"Manual save failed: {save_error}")
+                    await query.edit_message_text("❌ Failed to save session!")
+                    context.user_data.clear()
+                    return ConversationHandler.END
+            
+            # Final check
             if not os.path.exists(session_path):
                 await query.edit_message_text("❌ Session file not created!")
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            logger.info(f"✅ SQLite session file created: {session_path}")
+            logger.info(f"✅ Session file confirmed: {session_path}")
             
-            await query.edit_message_text("🔍 Checking spam status...")
+            await query.edit_message_text("🔍 Checking spam...")
             
             # Spam check
             spam_client = None
@@ -2270,7 +2307,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 if spam_client and spam_client.is_connected():
                     await spam_client.disconnect()
             
-            # ✅ BLOCK SPAM/FROZEN
+            # Block spam/frozen
             if spam_check['status'] in ['Spam', 'Frozen']:
                 try:
                     os.unlink(session_path)
@@ -2289,8 +2326,8 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # Upload SQLite session file to storage channel
-            await query.edit_message_text("📤 Uploading SQLite session...")
+            # Upload
+            await query.edit_message_text("📤 Uploading...")
             
             status_emoji = {
                 'Free': '🟢',
@@ -2312,7 +2349,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 caption_parts.append(f"👨‍💼 By: {query.from_user.username or user_id}")
                 caption_parts.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
                 
-                # Upload SQLite .session file to channel
                 channel_message = await context.bot.send_document(
                     chat_id=config.STORAGE_CHANNEL_ID,
                     document=f,
@@ -2321,20 +2357,19 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 )
             
             message_id = channel_message.message_id
-            logger.info(f"✅ SQLite session uploaded: message_id={message_id}")
+            logger.info(f"✅ Uploaded: message_id={message_id}")
             
-            # Delete temp file
+            # Delete temp
             try:
                 os.unlink(session_path)
-                logger.info(f"🗑️ Deleted temp: {session_path}")
-            except Exception as e:
-                logger.error(f"Delete failed: {e}")
+            except:
+                pass
             
-            # ✅ NOW STORE IN MONGODB - INSIDE TRY BLOCK
+            # Store in MongoDB
             database = get_db()
             
             session_data = {
-                'message_id': message_id,  # Reference to file in storage channel
+                'message_id': message_id,
                 'phone': phone,
                 'country': country,
                 'has_2fa': has_2fa,
@@ -2355,7 +2390,7 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             
             result = database.pending_uploads.insert_one(pending_data)
             pending_id = result.inserted_id
-            logger.info(f"✅ Stored in MongoDB: 8801907418703 - Stored in MongoDB")
+            logger.info(f"✅ Manual upload complete: {phone} - Stored in MongoDB")
             
             # Notify admin
             keyboard = [
@@ -2382,13 +2417,12 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             )
             
             await query.edit_message_text(
-                f"✅ Uploaded!\n\n"
+                f"✅ Upload Complete!\n\n"
                 f"📱 Phone: {phone}\n"
                 f"🌍 Country: {country}\n"
                 f"💰 Price: ${price:.2f}\n"
                 f"📊 Status: {spam_check['status']}\n\n"
-                f"💾 SQLite session stored in channel\n"
-                f"☁️ Metadata in MongoDB\n\n"
+                f"💾 Stored in cloud\n"
                 f"⏳ Waiting admin approval"
             )
         
@@ -2487,4 +2521,5 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
 
