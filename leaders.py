@@ -1913,7 +1913,7 @@ async def leader_upload_number_receive_country(update: Update, context: ContextT
     return LEADER_UPLOAD_NUMBER_PHONE
 
 async def leader_upload_number_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive phone and request OTP using OpenTele"""
+    """Receive phone and request OTP using ONLY OpenTele API (not your credentials)"""
     user_id = update.effective_user.id
     if user_id not in LEADERS and user_id != config.OWNER_ID:
         await update.message.reply_text("❌ Unauthorized")
@@ -1922,7 +1922,7 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
     phone = update.message.text.strip()
     
     if not phone.startswith('+') or len(phone) < 10:
-        await update.message.reply_text("❌ Invalid phone format!\n\nExample: +918012345678")
+        await update.message.reply_text("❌ Invalid phone format!")
         return LEADER_UPLOAD_NUMBER_PHONE
     
     context.user_data['manual_phone'] = phone
@@ -1930,124 +1930,59 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
     if not OPENTELE_AVAILABLE:
         await update.message.reply_text(
             "❌ OpenTele not installed!\n\n"
-            "Manual uploads require OpenTele.\n"
+            "Manual uploads require OpenTele for account safety.\n"
             "Contact admin to install: pip install opentele"
         )
         return ConversationHandler.END
     
     await update.message.reply_text(
         f"✅ Phone: {phone}\n\n"
+        "🔐 Using OpenTele API for safety\n"
         "⏳ Requesting OTP..."
     )
     
     try:
         import tempfile
-        from opentele.api import API
-        from opentele.tl import TelegramClient
         
-        # Try different OpenTele APIs in order
-        apis_to_try = [
-            ('TelegramDesktop', API.TelegramDesktop),
-            ('TelegramAndroid', API.TelegramAndroid),
-            ('TelegramAndroidX', API.TelegramAndroidX),
-            ('TelegramIOS', API.TelegramIOS),
-            ('TelegramMacOS', API.TelegramMacOS)
-        ]
+        # Select random OpenTele API (these are BUILT-IN, not your credentials)
+        selected_api = random.choice(AVAILABLE_APIS)
+        logger.info(f"🔐 Using OpenTele API: {selected_api}")
         
-        client = None
-        sent_code = None
-        selected_api_name = None
-        session_path = None
-        session_name = None
+        # Create temp session
+        temp_session = tempfile.NamedTemporaryFile(suffix='.session', delete=False, mode='w')
+        session_path = temp_session.name
+        temp_session.close()
+        os.unlink(session_path)
+        session_name = session_path.replace('.session', '')
         
-        for api_name, api in apis_to_try:
-            try:
-                logger.info(f"🔐 Trying OpenTele API: {api_name}")
-                
-                # Create temp session name
-                temp_dir = tempfile.gettempdir()
-                session_name = f"manual_upload_{user_id}_{int(time.time())}"
-                session_path = os.path.join(temp_dir, f"{session_name}.session")
-                
-                # Remove session file if exists
-                if os.path.exists(session_path):
-                    os.remove(session_path)
-                
-                # Create OpenTele TelegramClient directly with API
-                client = TelegramClient(session_name, api=api)
-                
-                await client.connect()
-                
-                if not client.is_connected():
-                    logger.warning(f"❌ Failed to connect with {api_name}")
-                    if client:
-                        try:
-                            await client.disconnect()
-                        except:
-                            pass
-                    client = None
-                    continue
-                
-                # Send OTP request
-                logger.info(f"📤 Sending OTP request to {phone} using {api_name}...")
-                sent_code = await client.send_code_request(phone)
-                
-                # If we got here, it worked!
-                selected_api_name = api_name
-                logger.info(f"✅ Successfully sent OTP using {api_name}")
-                break
-                
-            except Exception as e:
-                logger.error(f"❌ Failed with {api_name}: {e}")
-                if client and hasattr(client, 'is_connected'):
-                    try:
-                        if client.is_connected():
-                            await client.disconnect()
-                    except:
-                        pass
-                client = None
-                continue
+        # ✅ USE OPENTELE API - NOT YOUR CREDENTIALS
+        # OpenTele provides its own API_ID and API_HASH
+        client = TelegramClient(
+            session_name,
+            api=selected_api  # This uses OpenTele's built-in credentials
+        )
         
-        if not client or not sent_code:
-            raise Exception("Failed to send OTP with all available OpenTele APIs")
+        await client.connect()
+        sent_code = await client.send_code_request(phone)
         
-        # Store for later use
+        # Store for later
         context.user_data['temp_client'] = client
         context.user_data['session_path'] = session_path
-        context.user_data['session_name'] = session_name
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
-        context.user_data['api_used'] = selected_api_name
-        
-        logger.info(f"✅ OTP sent successfully to {phone} via {selected_api_name}")
+        context.user_data['opentele_api'] = selected_api
         
         await update.message.reply_text(
-            f"✅ OTP sent to {phone}!\n"
-            f"🔐 Using: {selected_api_name}\n\n"
-            "📨 Enter the OTP code you received:"
+            f"✅ OTP sent to {phone}!\n\n"
+            "📨 Enter the OTP code:"
         )
         
         return LEADER_UPLOAD_NUMBER_OTP
         
     except Exception as e:
-        logger.error(f"❌ Error sending OTP: {e}")
+        logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Cleanup on error
-        if 'temp_client' in context.user_data:
-            try:
-                client = context.user_data['temp_client']
-                if hasattr(client, 'is_connected') and client.is_connected():
-                    await client.disconnect()
-            except:
-                pass
-            context.user_data.pop('temp_client', None)
-        
-        await update.message.reply_text(
-            f"❌ Error sending OTP\n\n"
-            f"Details: {str(e)}\n\n"
-            "Please try again or contact admin."
-        )
+        await update.message.reply_text(f"❌ Error: {str(e)}")
         return LEADER_UPLOAD_NUMBER_PHONE
 
 async def leader_upload_number_receive_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2336,69 +2271,6 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 os.unlink(session_path)
             except:
                 pass
-            
-            # ✅ MOVE THIS INSIDE THE try BLOCK (before the except)
-            # Store in pending_uploads for admin approval
-            database = get_db()
-            
-            session_data = {
-                'message_id': message_id,
-                'phone': phone,
-                'country': country,
-                'has_2fa': has_2fa,
-                'two_fa_password': two_fa,
-                'price': price,
-                'info': info,
-                'spam_status': spam_check['status']
-            }
-            
-            pending_data = {
-                "uploader_id": user_id,
-                "uploader_username": query.from_user.username or query.from_user.first_name,
-                "sessions": [session_data],
-                "upload_type": "manual_number",
-                "status": "pending",
-                "created_at": datetime.utcnow()
-            }
-            
-            result = database.pending_uploads.insert_one(pending_data)
-            pending_id = result.inserted_id
-            
-            # Send to admin for approval
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Approve", callback_data=f'approve_upload_{pending_id}'),
-                    InlineKeyboardButton("❌ Reject", callback_data=f'reject_upload_{pending_id}')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await context.bot.send_message(
-                config.OWNER_ID,
-                f"📱 New Manual Number Upload\n\n"
-                f"👨‍💼 Seller: @{query.from_user.username or 'Unknown'} (ID: {user_id})\n"
-                f"📱 Phone: {phone}\n"
-                f"🌍 Country: {country}\n"
-                f"💰 Price: ${price:.2f}\n"
-                f"🔐 2FA: {'Yes' if has_2fa else 'No'}\n"
-                f"📊 Status: {spam_check['status']}\n"
-                f"ℹ️ Info: {info or 'None'}\n"
-                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                f"⚠️ Session will NOT be added until you approve!",
-                reply_markup=reply_markup
-            )
-            
-            await query.edit_message_text(
-                f"✅ Upload Submitted!\n\n"
-                f"📱 Phone: {phone}\n"
-                f"🌍 Country: {country}\n"
-                f"💰 Price: ${price:.2f}\n"
-                f"📊 Status: {spam_check['status']}\n\n"
-                f"☁️ Stored in MongoDB\n"
-                f"📦 File in storage channel\n\n"
-                f"⏳ Waiting for admin approval\n\n"
-                "You'll be notified once approved!"
-            )
         
         except Exception as login_error:
             # Handle login/session creation errors
@@ -2412,6 +2284,64 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
             )
             context.user_data.clear()
             return ConversationHandler.END
+        
+        # Store in pending_uploads for admin approval
+        database = get_db()
+        
+        session_data = {
+            'message_id': message_id,
+            'phone': phone,
+            'country': country,
+            'has_2fa': has_2fa,
+            'two_fa_password': two_fa,
+            'price': price,
+            'info': info,
+            'spam_status': spam_check['status']
+        }
+        
+        pending_data = {
+            "uploader_id": user_id,
+            "uploader_username": query.from_user.username or query.from_user.first_name,
+            "sessions": [session_data],
+            "upload_type": "manual_number",
+            "status": "pending",
+            "created_at": datetime.utcnow()
+        }
+        
+        result = database.pending_uploads.insert_one(pending_data)
+        pending_id = result.inserted_id
+        
+        # Send to admin for approval
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f'approve_upload_{pending_id}'),
+                InlineKeyboardButton("❌ Reject", callback_data=f'reject_upload_{pending_id}')
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await context.bot.send_message(
+            config.OWNER_ID,
+            f"📱 New Manual Number Upload\n\n"
+            f"👨‍💼 Seller: @{query.from_user.username or 'Unknown'} (ID: {user_id})\n"
+            f"📱 Phone: {phone}\n"
+            f"🌍 Country: {country}\n"
+            f"💰 Price: ${price:.2f}\n"
+            f"🔐 2FA: {'Yes' if has_2fa else 'No'}\n"
+            f"ℹ️ Info: {info or 'None'}\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"⚠️ Session will NOT be added until you approve!",
+            reply_markup=reply_markup
+        )
+        
+        await query.edit_message_text(
+            f"✅ Upload Submitted!\n\n"
+            f"📱 Phone: {phone}\n"
+            f"🌍 Country: {country}\n"
+            f"💰 Price: ${price:.2f}\n\n"
+            f"⏳ Waiting for admin approval\n\n"
+            "You'll be notified once approved!"
+        )
         
     except Exception as e:
         logger.error(f"Error uploading manual number: {e}")
@@ -2497,4 +2427,5 @@ def setup_leader_handlers(application):
     application.add_handler(CallbackQueryHandler(admin_approve_upload, pattern='^approve_upload_'))
     application.add_handler(CallbackQueryHandler(admin_reject_upload, pattern='^reject_upload_'))
     
+
     logger.info("✅ Leader handlers registered successfully")
