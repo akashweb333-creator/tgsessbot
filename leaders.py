@@ -1913,7 +1913,7 @@ async def leader_upload_number_receive_country(update: Update, context: ContextT
     return LEADER_UPLOAD_NUMBER_PHONE
 
 async def leader_upload_number_receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Request OTP using Telegram's official APIs (NOT your personal API)"""
+    """Request OTP using OpenTele - CORRECT IMPLEMENTATION"""
     user_id = update.effective_user.id
     if user_id not in LEADERS and user_id != config.OWNER_ID:
         await update.message.reply_text("❌ Unauthorized")
@@ -1931,47 +1931,58 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
     
     context.user_data['manual_phone'] = phone
     
-    # Check if OpenTele is available
-    if not OPENTELE_AVAILABLE:
-        await update.message.reply_text(
-            "❌ OpenTele not installed!\n\n"
-            "Manual uploads require OpenTele to use official Telegram APIs.\n\n"
-            "Tell admin to run: pip install opentele"
-        )
-        return ConversationHandler.END
-    
     await update.message.reply_text(
         f"✅ Phone: {phone}\n\n"
-        "🔐 Using Telegram Official API\n"
-        "⏳ Requesting OTP..."
+        "🔐 Requesting OTP from Telegram...\n\n"
+        "Please wait..."
     )
     
     try:
-        from opentele.td import TDesktop
-        from opentele.api import API
+        from telethon import TelegramClient
         import tempfile
-        import random
+        import os
         
-        # Select a random official Telegram API
-        official_api = random.choice([
-            API.TelegramAndroid,  # Official Android app API
-            API.TelegramIOS,      # Official iOS app API
-        ])
+        # Check if OpenTele is available
+        if not OPENTELE_AVAILABLE:
+            # Fallback to your original working code if OpenTele not installed
+            await update.message.reply_text(
+                "⚠️ OpenTele not available, using standard method..."
+            )
+            # Continue with original method...
         
-        logger.info(f"🔐 Using official API: {official_api}")
-        
-        # Create temp session path
+        # Create temp session file
         temp_session = tempfile.NamedTemporaryFile(suffix='.session', delete=False, mode='w')
         session_path = temp_session.name
         temp_session.close()
         os.unlink(session_path)
         session_name = session_path.replace('.session', '')
         
-        # Create TelegramClient using OpenTele's official API
-        # This uses Telegram's built-in app credentials, NOT yours
+        # ============================================
+        # CORRECT WAY: Get API credentials from OpenTele API object
+        # ============================================
+        if OPENTELE_AVAILABLE:
+            import random
+            from opentele.api import API
+            
+            # Select random official API
+            official_api = random.choice(AVAILABLE_APIS)
+            
+            # Extract api_id and api_hash from the API object
+            api_id = official_api.api_id
+            api_hash = official_api.api_hash
+            
+            logger.info(f"🔐 Using OpenTele API - ID: {api_id}")
+        else:
+            # Fallback to config (original method)
+            api_id = config.TELEGRAM_API_ID
+            api_hash = config.TELEGRAM_API_HASH
+            logger.info("Using config API")
+        
+        # Create client with extracted credentials
         client = TelegramClient(
             session_name,
-            api=official_api  # Uses Telegram's official API credentials
+            api_id,
+            api_hash
         )
         
         await client.connect()
@@ -1983,13 +1994,11 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         context.user_data['temp_client'] = client
         context.user_data['session_path'] = session_path
         context.user_data['phone_code_hash'] = sent_code.phone_code_hash
-        context.user_data['using_official_api'] = True
         
         await update.message.reply_text(
             f"✅ OTP Sent to {phone}!\n\n"
-            f"🔐 Using: {official_api.name}\n\n"
             "📨 Step 3: Enter OTP Code\n\n"
-            "Check your Telegram app and enter the code:"
+            "Check your Telegram app and enter the code you received:"
         )
         
         return LEADER_UPLOAD_NUMBER_OTP
@@ -2001,7 +2010,7 @@ async def leader_upload_number_receive_phone(update: Update, context: ContextTyp
         await update.message.reply_text(
             f"❌ Failed to request OTP\n\n"
             f"Error: {str(e)}\n\n"
-            "Please try again."
+            "Please check the phone number and try again."
         )
         return LEADER_UPLOAD_NUMBER_PHONE
 
@@ -2134,7 +2143,7 @@ async def leader_upload_number_receive_info(update: Update, context: ContextType
     return LEADER_UPLOAD_NUMBER_CONFIRM
 
 async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Create session and upload - WITH OpenTele conversion + Spam filtering"""
+    """Create session and upload - with spam filtering"""
     query = update.callback_query
     await query.answer()
     
@@ -2168,10 +2177,9 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
         try:
             await query.edit_message_text("🔐 Verifying OTP...")
             
-            # Sign in with phone, code, and phone_code_hash
             try:
                 await client.sign_in(phone, otp, phone_code_hash=phone_code_hash)
-                await query.edit_message_text("✅ Login successful! Checking account status...")
+                await query.edit_message_text("✅ Login successful! Checking account...")
                 
             except SessionPasswordNeededError:
                 if not has_2fa or not two_fa:
@@ -2180,9 +2188,9 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                     context.user_data.clear()
                     return ConversationHandler.END
                 
-                await query.edit_message_text("🔐 Verifying 2FA password...")
+                await query.edit_message_text("🔐 Verifying 2FA...")
                 await client.sign_in(password=two_fa)
-                await query.edit_message_text("✅ 2FA verified! Checking account status...")
+                await query.edit_message_text("✅ 2FA verified! Checking account...")
             
             except PhoneCodeInvalidError:
                 if client.is_connected():
@@ -2191,11 +2199,18 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # ============================================
-            # ✅ SPAM CHECK
-            # ============================================
+            # Disconnect to save session
+            if client.is_connected():
+                await client.disconnect()
+            
+            if not os.path.exists(session_path):
+                await query.edit_message_text("❌ Failed to create session file!")
+                context.user_data.clear()
+                return ConversationHandler.END
+            
             await query.edit_message_text("🔍 Checking spam status...")
             
+            # Spam check
             spam_client = None
             try:
                 session_name = session_path.replace('.session', '')
@@ -2208,20 +2223,15 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                 spam_check = await check_account_with_spambot(spam_client, phone)
                 await spam_client.disconnect()
                 
-                logger.info(f"📊 SpamBot result: {spam_check['status']}")
+                logger.info(f"📊 SpamBot: {spam_check['status']}")
             except Exception as e:
                 logger.error(f"Spam check error: {e}")
                 spam_check = {'status': 'Unknown', 'message': 'Could not check'}
                 if spam_client and spam_client.is_connected():
                     await spam_client.disconnect()
             
-            # ============================================
             # ✅ BLOCK SPAM/FROZEN
-            # ============================================
             if spam_check['status'] in ['Spam', 'Frozen']:
-                if client.is_connected():
-                    await client.disconnect()
-                
                 try:
                     os.unlink(session_path)
                 except:
@@ -2235,55 +2245,23 @@ async def leader_upload_number_confirm(update: Update, context: ContextTypes.DEF
                     f"{emoji} Status: {spam_check['status']}\n"
                     f"📱 Phone: {phone}\n\n"
                     f"This account is flagged by Telegram.\n"
-                    f"Spam/Frozen sessions are not allowed.\n\n"
-                    f"Please use a different account."
+                    f"Spam/Frozen sessions are not allowed."
                 )
                 
                 context.user_data.clear()
                 return ConversationHandler.END
             
-            # ============================================
-            # ✅ CONVERT TO OPENTELE (if available)
-            # This protects the session from future API abuse
-            # ============================================
-            if OPENTELE_AVAILABLE:
-                try:
-                    await query.edit_message_text("🔒 Protecting session with OpenTele...")
-                    
-                    # Convert session to TDesktop (most stable)
-                    from opentele.td import TDesktop
-                    from opentele.api import API
-                    
-                    tdesk = await TDesktop.FromTelethon(client, flag=UseCurrentSession)
-                    
-                    # Save as tdata
-                    tdesk.SaveTData(session_path.replace('.session', '_tdata'))
-                    
-                    logger.info("✅ Session converted to OpenTele format")
-                    await query.edit_message_text("✅ Session protected! Uploading...")
-                    
-                except Exception as e:
-                    logger.error(f"OpenTele conversion failed: {e}")
-                    # Continue anyway with regular session
-                    await query.edit_message_text("⚠️ OpenTele conversion failed, using regular session...")
+            # Upload to storage
+            await query.edit_message_text("📤 Uploading...")
             
-            # ============================================
-            # Disconnect and save
-            # ============================================
-            if client.is_connected():
-                await client.disconnect()
-            
-            if not os.path.exists(session_path):
-                await query.edit_message_text("❌ Failed to create session file!")
-                context.user_data.clear()
-                return ConversationHandler.END
-            
-            await query.edit_message_text("📤 Uploading to storage channel...")
-            
-            status_emoji = {'Free': '🟢', 'Unknown': '❓'}
+            status_emoji = {
+                'Free': '🟢',
+                'Frozen': '🔴',
+                'Spam': '🟡',
+                'Unknown': '❓'
+            }
             emoji = status_emoji.get(spam_check['status'], '❓')
             
-            # Upload to storage channel
             with open(session_path, 'rb') as f:
                 caption_parts = [
                     f"📱 Phone: {phone}",
@@ -2462,5 +2440,6 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
 
 
