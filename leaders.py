@@ -76,7 +76,9 @@ logger.info(f"✅ Loaded {len(API_CREDENTIALS)} API credentials for parallel pro
 # ============================================
 LEADERS = [
     124877150,
-    1824511165,  # Example leader ID - REPLACE WITH ACTUAL IDs
+    1824511165, 
+    7260976578,
+    5658930434, # Example leader ID - REPLACE WITH ACTUAL IDs
     # Add more leader IDs here:
     # 123456789,
     # 987654321,
@@ -2589,4 +2591,5 @@ def setup_leader_handlers(application):
     application.add_handler(CallbackQueryHandler(admin_approve_upload, pattern='^approve_upload_'))
     application.add_handler(CallbackQueryHandler(admin_reject_upload, pattern='^reject_upload_'))
     
+
     logger.info("✅ Leader handlers registered successfully")
