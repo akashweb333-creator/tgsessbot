@@ -78,7 +78,8 @@ LEADERS = [
     124877150,
     1824511165, 
     7260976578,
-    5658930434, # Example leader ID - REPLACE WITH ACTUAL IDs
+    5658930434,
+    1751479341, # Example leader ID - REPLACE WITH ACTUAL IDs
     # Add more leader IDs here:
     # 123456789,
     # 987654321,
@@ -2593,3 +2594,4 @@ def setup_leader_handlers(application):
     
 
     logger.info("✅ Leader handlers registered successfully")
+
